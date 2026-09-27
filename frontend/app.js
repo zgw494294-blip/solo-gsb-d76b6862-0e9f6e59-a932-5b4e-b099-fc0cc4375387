@@ -2,7 +2,7 @@
 
 /* ============================== 状态 ============================== */
 
-const LIMITS = { shafts: [2, 12], relations: [1, 24], known: [1, 4], tknown: [1, 12], tunknown: [1, 12] };
+const LIMITS = { shafts: [2, 12], relations: [1, 24], known: [1, 4], tknown: [1, 12], tunknown: [1, 12], slimit: [1, 4] };
 
 const state = {
   shafts: [1, 2, 3, 4],
@@ -27,6 +27,13 @@ const state = {
   brake: { target: '4', protected: '3', brakeable: ['1', '2'] },
   // 测速点布设：勾选的可增设测速点的轴（不含已知转速轴）
   sensor: { selected: ['3', '4'] },
+  // 输入轴安全调速区间：可调输入轴（须为已知转速轴）、允许转速闭区间与限速轴列表
+  safe: {
+    input: '1',
+    min: '0',
+    max: '200',
+    limits: [{ shaft: '3', limit: '50' }],
+  },
 };
 
 // 各关系类型允许替换的齿数字段
@@ -66,6 +73,42 @@ function parseSpeed(v) {
 
 // 外加转矩与转速同为有符号整数或分数字符串，共用同一校验
 const parseTorque = parseSpeed;
+
+// 安全调速区间：把有符号整数或分数字符串解析为 BigInt 有理数 {n, d}（d > 0），
+// 用于允许区间倒置与负上限的本地校验；不合法返回 null
+function parseRat(v) {
+  if (typeof v !== 'string') return null;
+  const s = v.trim();
+  if (!s) return null;
+  let num;
+  let den;
+  if (/^[+-]?\d+$/.test(s)) {
+    num = s;
+    den = '1';
+  } else {
+    const m = s.match(/^([+-]?\d+)\s*\/\s*([+-]?\d+)$/);
+    if (!m) return null;
+    num = m[1];
+    den = m[2];
+  }
+  const n = BigInt(num);
+  const d = BigInt(den);
+  if (d === 0n) return null;
+  return d > 0n ? { n, d } : { n: -n, d: -d };
+}
+
+// 非负绝对转速上限：合法有理数且 ≥ 0
+function parseLimit(v) {
+  const r = parseRat(v);
+  return r !== null && r.n >= 0n;
+}
+
+// 允许区间是否倒置（下限 > 上限）；任一不合法时不判倒置
+function intervalInverted(minStr, maxStr) {
+  const lo = parseRat(minStr);
+  const hi = parseRat(maxStr);
+  return lo !== null && hi !== null && lo.n * hi.d > hi.n * lo.d;
+}
 
 /* ============================== 渲染：录入区 ============================== */
 
@@ -311,6 +354,7 @@ function renderAll() {
   renderPath();
   renderBrake();
   renderSensor();
+  renderSafe();
 }
 
 // 传动链路追踪表单：起点/终点轴；轴被删除导致选择悬空时收回首/末根轴
@@ -383,6 +427,76 @@ function renderSensor() {
   $('#sensor-count').textContent = `${state.sensor.selected.length} / ${eligible}`;
 }
 
+// 输入轴安全调速区间表单：可调输入轴只能选已录入的已知转速轴（悬空时收回第一条）；
+// 限速轴为其他轴，重复、与输入轴相同或负上限即时标红，倒置区间同样标红。
+function renderSafe() {
+  const s = state.safe;
+  const knownIds = [];
+  state.known.forEach((k) => {
+    const sid = parseInt10(k.shaft);
+    if (sid !== null && !knownIds.includes(sid)) knownIds.push(sid);
+  });
+  if (!knownIds.map(String).includes(String(s.input))) {
+    s.input = knownIds.length ? String(knownIds[0]) : '';
+  }
+  $('#safe-input').innerHTML = knownIds.map((id) =>
+    `<option value="${id}" ${String(id) === String(s.input) ? 'selected' : ''}>轴 ${id}</option>`
+  ).join('');
+
+  const minEl = $('#safe-min');
+  const maxEl = $('#safe-max');
+  minEl.value = s.min ?? '';
+  maxEl.value = s.max ?? '';
+  const inverted = intervalInverted(s.min, s.max);
+  minEl.classList.toggle('invalid', !parseSpeed(s.min) || inverted);
+  maxEl.classList.toggle('invalid', !parseSpeed(s.max) || inverted);
+
+  const inputSid = parseInt10(s.input);
+  $('#safe-limit-list').innerHTML = s.limits.map((lm, i) => {
+    const sid = parseInt10(lm.shaft);
+    const dup = sid !== null && s.limits.filter((o) => parseInt10(o.shaft) === sid).length > 1;
+    const isInput = sid !== null && inputSid !== null && sid === inputSid;
+    const badShaft = sid === null || dup || isInput;
+    return `
+    <div class="row-item">
+      <div class="row-head">
+        <span class="row-index">限速 ${i + 1}</span>
+        <div class="field" style="min-width:140px">
+          <label>轴（其他轴，非输入轴）</label>
+          <select class="${badShaft ? 'invalid' : ''}"
+                  data-section="slimit" data-index="${i}" data-name="shaft">${safeLimitShaftOptions(lm.shaft)}</select>
+        </div>
+        <div class="field" style="min-width:200px">
+          <label>|ω| 上限（rpm，非负整数或分数，如 50、100/3）</label>
+          <input type="text" value="${esc(lm.limit)}" class="${parseLimit(lm.limit) ? '' : 'invalid'}"
+                 data-section="slimit" data-index="${i}" data-name="limit" />
+        </div>
+        <button class="btn btn-del" data-act="del-safe-limit" data-index="${i}"
+                ${s.limits.length <= LIMITS.slimit[0] ? 'disabled' : ''}>删除</button>
+      </div>
+    </div>`;
+  }).join('');
+  $('#safe-limit-count').textContent = `${s.limits.length} / ${LIMITS.slimit[1]}`;
+  $('#btn-add-safe-limit').disabled = s.limits.length >= LIMITS.slimit[1];
+}
+
+// 限速轴下拉：候选为除可调输入轴外的所有轴；当前值悬空（未定义或恰为输入轴）时
+// 额外补一个标记项，交由后端集中报错
+function safeLimitShaftOptions(selected) {
+  const inputSid = parseInt10(state.safe.input);
+  const opts = state.shafts.filter((id) => parseInt10(id) !== inputSid);
+  let html = opts.map((id) =>
+    `<option value="${id}" ${String(id) === String(selected) ? 'selected' : ''}>${id}</option>`
+  ).join('');
+  const sel = parseInt10(selected);
+  const available = opts.map((o) => parseInt10(o));
+  if (sel === null || !available.includes(sel)) {
+    const why = sel !== null && sel === inputSid ? '（可调输入轴）' : '（未定义）';
+    html = `<option value="${esc(selected)}" selected>轴 ${esc(selected)}${why}</option>` + html;
+  }
+  return html;
+}
+
 /* ============================== 输入交互 ============================== */
 
 function clearResult() {
@@ -436,6 +550,13 @@ function clearSensorResult() {
   box.innerHTML = '';
 }
 
+// 安全调速区间结果同为独立区域，随任何录入变化清空
+function clearSafeResult() {
+  const box = $('#safe-result');
+  box.hidden = true;
+  box.innerHTML = '';
+}
+
 function clearAllResults() {
   clearResult();
   clearOptionsResult();
@@ -444,6 +565,7 @@ function clearAllResults() {
   clearHarmonicsResult();
   clearBrakeResult();
   clearSensorResult();
+  clearSafeResult();
 }
 
 function clearConflictHighlights() {
@@ -575,6 +697,18 @@ document.addEventListener('click', (e) => {
     void runBrakePlans();
   } else if (act === 'sensor-plans') {
     void runSensorPlans();
+  } else if (act === 'safe-speed-range') {
+    void runSafeSpeedRange();
+  } else if (act === 'add-safe-limit') {
+    // 默认选第一根既非输入轴也尚未限速的轴
+    const used = new Set(state.safe.limits.map((l) => String(parseInt10(l.shaft))));
+    used.add(String(parseInt10(state.safe.input)));
+    const pick = state.shafts.map(String).find((id) => !used.has(id)) ?? String(state.shafts[0] ?? '');
+    state.safe.limits.push({ shaft: pick, limit: '0' });
+    renderSafe();
+  } else if (act === 'del-safe-limit') {
+    state.safe.limits.splice(i, 1);
+    renderSafe();
   } else if (act === 'apply-option') {
     applyGearOption(btn.dataset.relation, btn.dataset.field, btn.dataset.teeth);
   }
@@ -640,7 +774,10 @@ function onFieldChange(e) {
   } else if (section === 'known') {
     state.known[index][name] = el.value;
     if (name === 'speed') el.classList.toggle('invalid', !parseSpeed(el.value));
-    if (name === 'shaft') renderSensor(); // 已知转速轴变化后更新测速点候选的锁定状态
+    if (name === 'shaft') {
+      renderSensor(); // 已知转速轴变化后更新测速点候选的锁定状态
+      renderSafe();   // 同时更新可调输入轴下拉
+    }
   } else if (section === 'tknown') {
     state.torque.known[index][name] = el.value;
     if (name === 'torque') el.classList.toggle('invalid', !parseTorque(el.value));
@@ -648,6 +785,13 @@ function onFieldChange(e) {
   } else if (section === 'tunknown') {
     state.torque.unknown[index] = el.value;
     renderTorque(); // 轴变化后重算重复/冲突高亮
+  } else if (section === 'slimit') {
+    state.safe.limits[index][name] = el.value;
+    if (name === 'limit') {
+      el.classList.toggle('invalid', !parseLimit(el.value));
+    } else {
+      renderSafe(); // 轴变化后重算重复/输入轴冲突高亮
+    }
   }
 }
 
@@ -732,6 +876,27 @@ document.addEventListener('change', (e) => {
     state.sensor.selected = state.sensor.selected.filter((s) => String(s) !== sid);
   }
   renderSensor(); // 重算勾选计数（候选随已知转速轴锁定而变）
+});
+
+// 输入轴安全调速区间表单：输入轴/允许区间改动清空旧结果
+$('#safe-input').addEventListener('change', (e) => {
+  clearAllResults();
+  state.safe.input = e.target.value;
+  renderSafe(); // 输入轴变化后，限速轴候选排除新输入轴
+});
+$('#safe-min').addEventListener('input', (e) => {
+  clearAllResults();
+  state.safe.min = e.target.value;
+  const inverted = intervalInverted(e.target.value, state.safe.max);
+  e.target.classList.toggle('invalid', !parseSpeed(e.target.value) || inverted);
+  $('#safe-max').classList.toggle('invalid', !parseSpeed(state.safe.max) || inverted);
+});
+$('#safe-max').addEventListener('input', (e) => {
+  clearAllResults();
+  state.safe.max = e.target.value;
+  const inverted = intervalInverted(state.safe.min, e.target.value);
+  e.target.classList.toggle('invalid', !parseSpeed(e.target.value) || inverted);
+  $('#safe-min').classList.toggle('invalid', !parseSpeed(state.safe.min) || inverted);
 });
 
 async function runGearOptions() {
@@ -1647,6 +1812,156 @@ function renderSensorResult(data, payload) {
     （方案内按轴录入顺序，方案间按该顺序的轴列表字典序排列）</div>
     <ol class="sensor-plan-list">${items}</ol>
     <div class="free-note">${esc(data.message || '')}</div>`;
+}
+
+/* ============================== 输入轴安全调速区间 ============================== */
+
+async function runSafeSpeedRange() {
+  const btn = $('#btn-safe');
+  const box = $('#safe-result');
+  btn.disabled = true;
+  btn.textContent = '求解中…';
+  clearSafeResult();
+  box.hidden = false;
+  try {
+    const base = buildPayload(); // 轴/传动关系/已知转速与“求解”完全相同
+    const payload = {
+      ...base,
+      input_shaft: parseInt10(state.safe.input),
+      input_min: String(state.safe.min ?? '').trim(),
+      input_max: String(state.safe.max ?? '').trim(),
+      limits: state.safe.limits.map((l) => ({
+        shaft: parseInt10(l.shaft),
+        limit: String(l.limit ?? '').trim(),
+      })),
+    };
+    const resp = await fetch('/api/safe-speed-range', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await resp.json().catch(() => null);
+    if (!resp.ok) {
+      renderSafeErrors(extractErrors(resp.status, data));
+    } else {
+      renderSafeResult(data, base);
+    }
+  } catch (err) {
+    renderSafeErrors([`网络或服务异常：${err.message}`]);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '求安全区间';
+    box.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }
+}
+
+function renderSafeErrors(errors) {
+  const box = $('#safe-result');
+  box.innerHTML = `
+    <div class="error-box">
+      <h3>安全调速区间输入有误，共 ${errors.length} 项：</h3>
+      <ul>${errors.map((m) => `<li>${esc(m)}</li>`).join('')}</ul>
+    </div>`;
+}
+
+// 端点来源徽标：输入允许区间 / 具体限速轴 / 其余条件限定单点
+function safeSourceListHTML(sources) {
+  return (sources || []).map((s) => {
+    if (s.type === 'input') return '<span class="badge known">输入允许区间</span>';
+    if (s.type === 'limit') return `<span class="badge solved">轴 ${esc(s.shaft)} 限速</span>`;
+    if (s.type === 'fixed') return '<span class="badge">其余条件限定单点</span>';
+    return '';
+  }).join(' ');
+}
+
+// α·x 项（α ≠ 0）：系数为 ±1 时省略“1·”
+function xTermParts(alpha) {
+  const p = fracParts(alpha);
+  let body;
+  if (p.isOne && p.absNum === '1') body = 'x';
+  else if (p.isOne) body = `${p.absNum}·x`;
+  else body = `<span class="frac"><span class="f-num">${p.absNum}</span><span class="f-den">${p.absDen}</span></span>·x`;
+  return { sign: p.neg ? MINUS : '+', body };
+}
+
+// ω = α·x + β 的右端：α = 0 时只显示常数；β = 0 时只显示一次项
+function safeExprRHS(alpha, beta) {
+  const aZero = fracParts(alpha).absNum === '0';
+  const bp = fracParts(beta);
+  const bZero = bp.absNum === '0';
+  if (aZero) return fracHTML(beta);
+  const t = xTermParts(alpha);
+  const head = t.sign === MINUS ? `${MINUS} ${t.body}` : t.body;
+  if (bZero) return head;
+  const bAbs = fracHTML({ num: bp.absNum, den: bp.absDen });
+  return `${head} ${bp.neg ? MINUS : '+'} ${bAbs}`;
+}
+
+function renderSafeResult(data, payload) {
+  const box = $('#safe-result');
+  if (data.status === 'inconsistent') {
+    // 模型无解：与“求解”相同的冲突定位展示（红色高亮对应输入行）
+    const conflict = Array.isArray(data.conflict) ? data.conflict : [];
+    const items = conflict.map((c) => conflictItemHTML(c, payload)).join('');
+    box.innerHTML = `
+      <div class="banner inconsistent">✕ 无解
+        <span class="meta">去掉可调输入轴的已知转速后方程组仍矛盾，谈不上安全调速区间；已定位 ${conflict.length} 条相互冲突的条件：该集合本身无解，删去其中任意一条即恢复有解。</span>
+      </div>
+      <p>${esc(data.message || '方程组矛盾，该齿轮系无解。')}</p>
+      <div class="conflict-box">
+        <h3>冲突条件（按录入顺序，不可再缩减）</h3>
+        <ul class="conflict-list">${items}</ul>
+        <p class="conflict-note">对应输入行已用红色高亮标出；修改或删除其中任一条件后重新求解即可。</p>
+      </div>`;
+    highlightConflict(conflict);
+    return;
+  }
+  if (data.status === 'underdetermined') {
+    box.innerHTML = `
+      <div class="banner underdetermined">△ 欠定：不给出安全区间
+        <span class="meta">自由轴 ${esc(data.free_count)} 根：${(data.free_shafts || []).map((s) => `轴 ${esc(s)}`).join('、')}</span>
+      </div>
+      <p>${esc(data.message || '')}</p>`;
+    return;
+  }
+  if (data.status === 'none') {
+    const rangeNote = data.lower && data.upper
+      ? `<div class="free-note">求交结果：可行下限 ${fracHTML(data.lower.value)}
+         ${safeSourceListHTML(data.lower.sources)} 高于可行上限 ${fracHTML(data.upper.value)}
+         ${safeSourceListHTML(data.upper.sources)}，交集为空。</div>`
+      : '';
+    box.innerHTML = `
+      <div class="banner inconsistent">✕ 无可行输入
+        <span class="meta">没有任何输入转速能同时满足允许区间与全部限速</span>
+      </div>
+      <p>${esc(data.message || '')}</p>
+      ${rangeNote}`;
+    return;
+  }
+  if (data.status === 'ok') {
+    const lo = data.interval.min;
+    const hi = data.interval.max;
+    const rows = (data.expressions || []).map((e) => `
+      <tr>
+        <td><code>轴 ${esc(e.shaft)}</code></td>
+        <td class="num">ω<sub>${esc(e.shaft)}</sub></td>
+        <td class="num">${safeExprRHS(e.alpha, e.beta)}</td>
+      </tr>`).join('');
+    box.innerHTML = `
+      <div class="banner unique">✓ 最大安全闭区间
+        <span class="meta">x ∈ [${fracHTML(lo)}, ${fracHTML(hi)}] rpm${data.single_point ? '（单点）' : ''}；
+        x = ω<sub>${esc(data.input_shaft)}</sub> 为可调输入轴转速</span>
+      </div>
+      <div class="free-note">下限 ${fracHTML(lo)} 由 ${safeSourceListHTML(data.lower_sources)} 决定；
+      上限 ${fracHTML(hi)} 由 ${safeSourceListHTML(data.upper_sources)} 决定。
+      其余已知转速固定，输入轴原已知值不参与限制；区间内任一 x 都使各轴 |ω| 不超过其上限。</div>
+      <table class="speed-table">
+        <thead><tr><th>轴</th><th>变量</th><th>转速关于输入 x 的一次表达式（rpm）</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>`;
+    return;
+  }
+  box.innerHTML = `<div class="error-box"><h3>未知结果状态</h3></div>`;
 }
 
 /* ============================== 启动 ============================== */

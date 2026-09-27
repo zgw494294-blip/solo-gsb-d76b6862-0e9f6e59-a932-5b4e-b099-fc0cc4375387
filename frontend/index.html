@@ -10,7 +10,7 @@
   <header class="site-header">
     <div class="wrap">
       <h1><span class="gear">⚙</span> 齿轮系转速求解台</h1>
-      <p class="sub">录入轴、传动关系与已知转速，以有理数精确联立 &mdash; 外啮合 / 内啮合 / 行星轮系 · 目标配齿 · 理想传动转矩平衡 · 传动链路追踪 · 啮合谐波重合诊断 · 最少制动轴方案 · 测速点布设</p>
+      <p class="sub">录入轴、传动关系与已知转速，以有理数精确联立 &mdash; 外啮合 / 内啮合 / 行星轮系 · 目标配齿 · 理想传动转矩平衡 · 传动链路追踪 · 啮合谐波重合诊断 · 最少制动轴方案 · 测速点布设 · 输入轴安全调速区间</p>
     </div>
   </header>
 
@@ -138,6 +138,27 @@
       <p class="opt-note">复用上方轴、传动关系与已知转速（校验与“求解”一致）；模型无解时返回原有冲突定位。对每个候选测速集合，把选中轴视为可补充的转速约束 ω = 读数（读数未知）：系数矩阵 [关系行；已知行；测速单位行] 的有理数秩等于轴数时，任意相容读数下全部轴转速都能唯一确定。枚举勾选轴的全部子集（含空集），返回测点数最少的所有有效方案：方案内按轴录入顺序，方案间按该顺序的轴列表字典序排列；当前已唯一确定时返回含空集合的方案，候选轴全部用上仍不足时明确返回无方案。任何输入变更即清空方案结果。</p>
     </section>
 
+    <section class="card" id="card-safe">
+      <div class="card-head">
+        <h2>⑩ 输入轴安全调速区间 <span class="hint">选一条已知转速作为可调输入，求同时满足各轴限速的最大安全闭区间</span></h2>
+        <button class="btn btn-primary" id="btn-safe" data-act="safe-speed-range">求安全区间</button>
+      </div>
+      <div class="grid">
+        <div class="field"><label>可调输入轴（须为已录入的已知转速轴；其原值不限制调速）</label>
+          <select id="safe-input"></select></div>
+        <div class="field"><label>允许转速下限（rpm，有符号整数或分数）</label>
+          <input type="text" id="safe-min" /></div>
+        <div class="field"><label>允许转速上限（rpm，有符号整数或分数）</label>
+          <input type="text" id="safe-max" /></div>
+      </div>
+      <div class="sub-head safe-limit-head">
+        <h3>限速轴 <span class="hint">1～4 根其他轴；各自的非负绝对转速上限 |ω| ≤ L（rpm）</span><span class="count" id="safe-limit-count"></span></h3>
+        <button class="btn" id="btn-add-safe-limit" data-act="add-safe-limit">＋ 添加限速轴</button>
+      </div>
+      <div id="safe-limit-list" class="rows"></div>
+      <p class="opt-note">复用上方轴、传动关系与已知转速（校验与“求解”一致）：去掉可调输入轴的已知转速后做有理数消元，其余已知转速固定。各轴转速表示为输入转速 x 的一次表达式 ω = α·x + β；其余条件若已把输入限定为单点，则可行集至多含该点；固定 x 后仍有自由变量时返回欠定、不给出安全区间。把输入允许区间与每条 |轴转速| ≤ 上限求交，返回精确的最大安全闭区间（可为单点）或无可行值，并标明决定两个端点的限速轴。任何输入变更即清空结果。</p>
+    </section>
+
     <div class="action-bar">
       <button class="btn btn-primary btn-lg" id="btn-solve" data-act="solve">求 解</button>
     </div>
@@ -149,6 +170,7 @@
     <section id="harmonics-result" class="result" hidden></section>
     <section id="brake-result" class="result" hidden></section>
     <section id="sensor-result" class="result" hidden></section>
+    <section id="safe-result" class="result" hidden></section>
   </main>
 
   <footer class="site-footer wrap">

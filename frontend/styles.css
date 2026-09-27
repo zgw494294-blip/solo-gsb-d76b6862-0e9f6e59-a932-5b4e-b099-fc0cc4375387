@@ -489,6 +489,9 @@ table.speed-table {
 }
 .sensor-chip.empty { color: var(--ink-soft); background: #eef1f6; border-color: var(--line); }
 
+/* ---------- 输入轴安全调速区间 ---------- */
+.safe-limit-head { margin-top: 12px; }
+
 .site-footer {
   color: var(--ink-soft);
   font-size: 12px;

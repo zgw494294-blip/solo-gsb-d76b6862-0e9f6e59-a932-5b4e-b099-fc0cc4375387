@@ -71,6 +71,15 @@
   的所有有效方案——方案内按轴录入顺序，方案间按该顺序的轴列表字典序排列；
   当前已唯一确定时返回含空集合的方案，候选轴全部用上仍不足时明确返回无
   方案（见下文“测速点布设”一节）。
+- **输入轴安全调速区间**（`POST /api/safe-speed-range`）：从已录入的已知
+  转速中选定一根**可调输入轴**，填写该轴允许的有符号转速闭区间与 **1～4 根
+  其他轴**各自的非负绝对转速上限；其余已知转速固定，所选项原值不限制调速。
+  拒绝倒置区间、重复或未知的限速轴。把输入轴转速记为 `x`，用有理数求各轴
+  转速随 `x` 变化的一次表达式 `ω = α·x + β`；其余条件若已把输入限定为单点，
+  可行集至多含该点；存在可行输入但该输入下仍有轴速不能唯一确定时返回
+  **欠定**、不给出安全区间。把输入区间与每条 `|轴转速| ≤ 上限` 求交，返回
+  精确的**最大安全闭区间**（可为单点）或无可行值，页面同时显示决定两个
+  端点的限速轴（见下文“输入轴安全调速区间”一节）。
 - 任何输入发生变更即自动清除旧结果，避免展示过期答案。
 
 ## 一条命令启动
@@ -110,7 +119,10 @@ uvicorn backend.app.main:app --reload --port 8000
 - `POST /api/brake-plans`：最少制动轴方案，枚举可制动轴子集求制动轴数最少的
   全部有效方案（见下文“最少制动轴方案”一节）；
 - `POST /api/sensor-plans`：测速点布设，枚举可增设测速点的轴的子集，求测点数
-  最少的全部有效方案（见下文“测速点布设”一节）。
+  最少的全部有效方案（见下文“测速点布设”一节）；
+- `POST /api/safe-speed-range`：输入轴安全调速区间，把一条已知转速改为可调
+  输入，求同时满足各轴限速的最大安全闭区间（见下文“输入轴安全调速区间”
+  一节）。
 
 `POST /api/solve`，JSON 请求体：
 
@@ -618,18 +630,116 @@ RREF——目标轴在所有允许运动中恒为零，当且仅当它的主元�
   HTTP 400 与集中错误列表，格式同 `/api/solve`；
 - 页面上已知转速轴在候选区锁定不可勾选，任何输入变更即清空方案结果。
 
+## 输入轴安全调速区间：`POST /api/safe-speed-range`
+
+把一条已录入的已知转速改为可调输入，求同时满足各轴限速的最大安全闭区间。
+请求体与 `/api/solve` 相同（`shafts` / `relations` / `known`，校验规则全部
+复用），另加 `input_shaft` / `input_min` / `input_max` / `limits`：
+
+```json
+{
+  "shafts": [{ "id": 1 }, { "id": 2 }, { "id": 3 }, { "id": 4 }],
+  "relations": [
+    { "type": "planetary", "s": 1, "r": 2, "c": 3, "zs": "20", "zr": "60" },
+    { "type": "external",  "a": 4, "b": 2, "za": "10", "zb": "10" }
+  ],
+  "known": [
+    { "shaft": 2, "speed": "0" },
+    { "shaft": 1, "speed": "100" }
+  ],
+  "input_shaft": 1,
+  "input_min": "-150",
+  "input_max": "150",
+  "limits": [
+    { "shaft": 3, "limit": "30" },
+    { "shaft": 4, "limit": "40" }
+  ]
+}
+```
+
+- `input_shaft`：可调输入轴编号，**必须是已录入的已知转速轴**；建模时去掉
+  该轴的已知转速行（所选项原值不限制调速），其余已知转速固定；
+- `input_min` / `input_max`：输入轴允许的有符号转速闭区间端点（rpm），接受
+  有符号整数或分数字符串；下限大于上限（倒置区间）报 HTTP 400；
+- `limits`：1～4 根**其他轴**各自的非负绝对转速上限 `|ω| ≤ L`（rpm，非负
+  整数或分数字符串）；限速轴重复、未在轴列表中定义、与输入轴相同或上限为
+  负均报 HTTP 400。
+
+计算（全部有理数精确完成）：去掉输入轴的已知转速后做 RREF。上例中齿圈
+`ω₂ = 0` 固定，行星排给出 `ω₃ = x/4`（`x = ω₁` 为输入转速），轴 4 经外啮合
+恒为 0；输入区间 `[-150, 150]` 与 `|x/4| ≤ 30`（即 `x ∈ [-120, 120]`）、
+`|0| ≤ 40`（恒成立）求交，最大安全闭区间为 `[-120, 120]`，两个端点都由
+轴 3 的限速决定：
+
+```json
+{
+  "status": "ok",
+  "shafts": [1, 2, 3, 4],
+  "input_shaft": 1,
+  "input_interval": {
+    "min": { "num": "-150", "den": "1", "text": "-150" },
+    "max": { "num": "150", "den": "1", "text": "150" }
+  },
+  "limits": [
+    { "shaft": 3, "limit": { "num": "30", "den": "1", "text": "30" } },
+    { "shaft": 4, "limit": { "num": "40", "den": "1", "text": "40" } }
+  ],
+  "single_point": false,
+  "expressions": [
+    { "shaft": 1, "alpha": { "num": "1", "den": "1", "text": "1" },
+      "beta": { "num": "0", "den": "1", "text": "0" } },
+    { "shaft": 2, "alpha": { "num": "0", "den": "1", "text": "0" },
+      "beta": { "num": "0", "den": "1", "text": "0" } },
+    { "shaft": 3, "alpha": { "num": "1", "den": "4", "text": "1/4" },
+      "beta": { "num": "0", "den": "1", "text": "0" } },
+    { "shaft": 4, "alpha": { "num": "0", "den": "1", "text": "0" },
+      "beta": { "num": "0", "den": "1", "text": "0" } }
+  ],
+  "interval": {
+    "min": { "num": "-120", "den": "1", "text": "-120" },
+    "max": { "num": "120", "den": "1", "text": "120" }
+  },
+  "lower_sources": [{ "type": "limit", "shaft": 3 }],
+  "upper_sources": [{ "type": "limit", "shaft": 3 }]
+}
+```
+
+说明：
+
+- `expressions`：各轴转速关于输入 `x` 的一次表达式 `ω = α·x + β`（`α`、`β`
+  均为 `{num, den, text}` 十进制整数字符串）；
+- `interval`：精确的最大安全闭区间（`single_point = true` 时为单点）；
+- `lower_sources` / `upper_sources`：决定两个端点的来源——
+  `{ "type": "input" }`（输入允许区间）、`{ "type": "limit", "shaft": … }`
+  （某根限速轴）或 `{ "type": "fixed" }`（其余条件把输入限定为单点）；并列
+  决定同一端点时全部列出；
+- **其余条件把输入限定为单点**（例如去掉输入轴已知转速后模型已唯一确定）：
+  可行集至多含该单点——单点落在允许区间外或某限速轴的恒定转速越限时返回
+  `status = "none"`，否则安全区间即该单点，端点来源为 `"fixed"`；
+- **欠定**（`status = "underdetermined"`）：存在可行输入，但固定 `x` 后仍有
+  自由变量（返回 `free_count` / `free_shafts`），该输入下仍有轴速不能唯一
+  确定，不给出安全区间；
+- **无可行值**（`status = "none"`）：输入区间与各限速约束求交后为空（响应
+  附 `lower` / `upper` 及各自来源），或某限速轴的转速不随输入变化且恒定
+  越限；
+- 模型无解时返回与 `/api/solve` 相同的 `status = "inconsistent"` 与不可再
+  缩减 `conflict` 冲突集（在去掉输入轴已知转速后的条件集上定位）；输入非法
+  同样返回 HTTP 400 与集中错误列表；
+- 页面上区间、决定端点的限速轴与各轴一次表达式一并展示，任何输入变更即
+  清空结果。
+
 ## 目录结构
 
 ```
 .
 ├── backend/
 │   └── app/
-│       ├── main.py       # FastAPI 路由（/api/solve、/api/gear-options、/api/torque-balance、/api/transmission-paths、/api/mesh-harmonics、/api/brake-plans、/api/sensor-plans）与静态文件托管
-│       └── solver.py     # 输入校验 + Fraction 精确 RREF 求解 + 1～500 配齿枚举 + 转矩平衡 + 最短链路追踪（BFS）+ 啮合谐波重合诊断 + 最少制动轴方案枚举 + 测速点布设枚举
+│       ├── main.py       # FastAPI 路由（/api/solve、/api/gear-options、/api/torque-balance、/api/transmission-paths、/api/mesh-harmonics、/api/brake-plans、/api/sensor-plans、/api/safe-speed-range）与静态文件托管
+│       └── solver.py     # 输入校验 + Fraction 精确 RREF 求解 + 1～500 配齿枚举 + 转矩平衡 + 最短链路追踪（BFS）+ 啮合谐波重合诊断 + 最少制动轴方案枚举 + 测速点布设枚举 + 输入轴安全调速区间求交
 ├── frontend/
 │   ├── index.html
 │   ├── styles.css
-│   └── app.js            # 录入、校验提示、结果渲染、配齿回填、转矩平衡、链路追踪、谐波重合诊断、制动方案、测速点布设与高亮
+│   └── app.js            # 录入、校验提示、结果渲染、配齿回填、转矩平衡、链路追踪、谐波重合诊断、制动方案、测速点布设、安全调速区间与高亮
 ├── Dockerfile
 ├── docker-compose.yml
 └── requirements.txt

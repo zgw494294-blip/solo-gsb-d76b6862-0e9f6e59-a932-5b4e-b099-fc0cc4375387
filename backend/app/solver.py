@@ -57,6 +57,17 @@ RREF；模型无解时返回与 /api/solve 相同的不可再缩减冲突集。�
 数最少的所有有效方案；方案内按轴录入顺序，方案间按该顺序的轴列表字典序
 排列。当前已唯一确定时返回含空集合的方案；候选轴全部用上仍不能定解时
 明确返回无方案。已知转速轴不得作为候选。
+
+/api/safe-speed-range（输入轴安全调速区间）复用同一套录入校验：从已录入的
+已知转速中选定一根可调输入轴，给出该轴允许的有符号转速闭区间与 1~4 根其他
+轴各自的非负绝对转速上限；拒绝倒置区间、重复或未知的限速轴。建模时去掉
+输入轴的已知转速行（所选项原值不限制调速），其余已知转速固定。把输入轴
+转速记为 x，对“传动关系 + 其余已知转速”做有理数 RREF：其余条件可能已把
+输入限定为单点（可行集至多含该点）；若固定 x 后仍有自由变量，则该输入下
+轴速不能唯一确定，返回欠定、不给出安全区间。否则各轴转速是 x 的一次表达
+式 ω_j = α_j·x + β_j，把输入区间与每条 |轴转速|≤上限（关于 x 的一次不等
+式）求交，返回精确的最大安全闭区间（可为单点）或无可行值，并给出决定两
+个端点的来源（输入允许区间或具体限速轴）。
 """
 
 from collections import deque
@@ -79,6 +90,8 @@ MIN_TORQUE_UNKNOWN = 1
 MAX_TORQUE_UNKNOWN = MAX_SHAFTS
 MAX_DIGITS = 18  # 数字位数上限，防止恶意超大整数导致运算爆炸
 MAX_HARMONIC = 12  # 啮合谐波重合诊断：每条确定且非零的基频取 1~12 次谐波
+MIN_SPEED_LIMITS = 1   # 输入轴安全调速区间：限速轴数量下限
+MAX_SPEED_LIMITS = 4   # 输入轴安全调速区间：限速轴数量上限
 
 
 class Shaft(BaseModel):
@@ -166,6 +179,23 @@ class SensorPlansRequest(BaseModel):
     relations: list[Relation] | None = None
     known: list[KnownSpeed] | None = None
     sensors: list[int | str | None] | None = None  # 可增设测速点的轴（不含已知转速轴）
+
+
+class SpeedLimit(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    shaft: int | str | None = None
+    limit: int | float | str | None = None  # 非负绝对转速上限 |ω| ≤ L（rpm）
+
+
+class SafeSpeedRangeRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    shafts: list[Shaft] | None = None
+    relations: list[Relation] | None = None
+    known: list[KnownSpeed] | None = None
+    input_shaft: int | str | None = None      # 可调输入轴（须为已录入的已知转速轴）
+    input_min: int | float | str | None = None  # 输入轴允许转速闭区间下限（有符号，rpm）
+    input_max: int | float | str | None = None  # 输入轴允许转速闭区间上限（有符号，rpm）
+    limits: list[SpeedLimit] | None = None    # 1~4 根其他轴各自的非负绝对转速上限
 
 
 def _parse_teeth(name: str, value: object, errors: list[str]) -> int | None:
@@ -1484,4 +1514,333 @@ def sensor_plans(req: SensorPlansRequest) -> dict:
         "count": len(best),
         "plans": [[shaft_ids[c] for c in cols] for cols in best],
         "message": message,
+    }
+
+
+def safe_speed_range(req: SafeSpeedRangeRequest) -> dict:
+    """输入轴安全调速区间：把一条已知转速改为可调输入，求满足各轴限速的最大安全闭区间。
+
+    轴、传动关系与已知转速的校验和 /api/solve 完全复用。可调输入轴必须选自
+    已录入的已知转速；建模时去掉该轴的已知转速行（所选项原值不限制调速），
+    其余已知转速固定。把输入轴转速记为 x，对“传动关系 + 其余已知转速”做
+    有理数 RREF，按输入轴转速表达式的形态分四种情形：
+
+      · 无自由变量：其余条件已把输入限定为单点 x0——x0 落在允许区间外或某
+        限速轴的恒定转速越限时无可行值，否则安全区间即单点 [x0, x0]；
+      · 有自由变量但输入表达式不含自由变量：输入同样被限定为单点 x0，x0 在
+        允许区间内即存在可行输入，但剩余自由变量使该输入下仍有轴速不能唯一
+        确定，返回欠定、不给出安全区间；
+      · 自由变量 ≥ 2 且输入表达式含自由变量：固定 x 只能消去一个自由度，
+        同样返回欠定；
+      · 恰有 1 个自由变量且输入表达式含它：x 唯一确定全部轴速，各轴转速
+        是 x 的一次表达式 ω_j = α_j·x + β_j（有理数）。
+
+    两种欠定情形下，若某限速轴的转速已被其余条件唯一确定且恒定越限，则根本
+    不存在可行输入，改判无可行值。
+
+    最后一种情形下，把输入允许区间与每条 |α_j·x + β_j| ≤ L_j（关于 x 的一次
+    不等式，解为 x 的闭区间）逐一求交：α_j = 0 时退化为常数检查，越限即无可
+    行值。交集非空则返回精确的最大安全闭区间（可为单点），并给出决定两个
+    端点的来源（输入允许区间或具体限速轴，并列时全部列出）；交集为空返回
+    无可行值。模型无解时返回与 /api/solve 相同的不可再缩减冲突集（在去掉
+    输入轴已知转速后的条件集上定位）。倒置区间、重复或未知的限速轴、限速轴
+    与输入轴相同、负上限等均返回 HTTP 400。
+    """
+    prepared = _prepare(req)
+    shaft_ids = prepared["shaft_ids"]
+    index = prepared["index"]
+    n = prepared["n"]
+    rows = prepared["rows"]
+    row_tags = prepared["row_tags"]
+
+    errors: list[str] = []
+
+    # ---------- 可调输入轴：必须选自已录入的已知转速 ----------
+    known_ids = [_parse_int(ks.shaft) for ks in req.known or []]  # 已通过 _prepare 校验
+    input_sid = _parse_int(req.input_shaft)
+    if input_sid is None:
+        errors.append("可调输入轴编号非法")
+    elif input_sid not in index:
+        errors.append(f"可调输入轴 {input_sid} 未在轴列表中定义")
+    elif input_sid not in known_ids:
+        errors.append(f"可调输入轴 {input_sid} 没有已录入的已知转速：可调输入必须从已知转速中选择")
+
+    # ---------- 输入轴允许转速闭区间（有符号） ----------
+    lo = _parse_rational(req.input_min)
+    hi = _parse_rational(req.input_max)
+    if lo is None:
+        errors.append(
+            f"输入轴允许转速下限 “{req.input_min}” 非法，"
+            "须为有符号整数或分数字符串（如 -120、3/2），分母不能为 0"
+        )
+    if hi is None:
+        errors.append(
+            f"输入轴允许转速上限 “{req.input_max}” 非法，"
+            "须为有符号整数或分数字符串（如 -120、3/2），分母不能为 0"
+        )
+    if lo is not None and hi is not None and lo > hi:
+        errors.append(f"输入轴允许转速区间倒置：下限 {lo} 大于上限 {hi}（rpm）")
+
+    # ---------- 限速轴：1~4 根其他轴，各自的非负绝对转速上限 ----------
+    if not req.limits:
+        errors.append(f"请至少录入 {MIN_SPEED_LIMITS} 根限速轴")
+    elif len(req.limits) > MAX_SPEED_LIMITS:
+        errors.append(f"限速轴最多 {MAX_SPEED_LIMITS} 根（当前 {len(req.limits)}）")
+
+    limit_items: list[tuple[int, Fraction]] = []
+    seen_limit: set[int] = set()
+    for k, lm in enumerate(req.limits or []):
+        sid = _parse_int(lm.shaft)
+        if sid is None:
+            errors.append(f"限速轴 {k + 1}：轴编号非法")
+            continue
+        if sid not in index:
+            errors.append(f"限速轴 {k + 1}：轴 {sid} 未在轴列表中定义")
+            continue
+        if sid in seen_limit:
+            errors.append(f"限速轴 {k + 1}：轴 {sid} 重复给定")
+            continue
+        if input_sid is not None and sid == input_sid:
+            errors.append(f"限速轴 {k + 1}：轴 {sid} 是可调输入轴，限速轴须为其他轴")
+            continue
+        limit = _parse_rational(lm.limit)
+        if limit is None:
+            errors.append(
+                f"限速轴 {k + 1}（轴 {sid}）：上限 “{lm.limit}” 非法，"
+                "须为非负整数或分数字符串（如 120、3/2），分母不能为 0"
+            )
+            continue
+        if limit < 0:
+            errors.append(f"限速轴 {k + 1}（轴 {sid}）：上限 {limit} 为负，绝对转速上限须非负")
+            continue
+        seen_limit.add(sid)
+        limit_items.append((sid, limit))
+
+    if errors:
+        raise HTTPException(status_code=400, detail={"errors": errors})
+
+    assert input_sid is not None and lo is not None and hi is not None
+
+    # ---------- 去掉可调输入轴的已知转速行：所选项原值不限制调速，其余已知固定 ----------
+    drop_no = next(
+        k + 1 for k, ks in enumerate(req.known or []) if _parse_int(ks.shaft) == input_sid
+    )
+    work_rows = [r for r, tag in zip(rows, row_tags) if tag != ("known", drop_no)]
+    work_tags = [t for t in row_tags if t != ("known", drop_no)]
+
+    base = {
+        "shafts": shaft_ids,
+        "input_shaft": input_sid,
+        "input_interval": {"min": _fraction_json(lo), "max": _fraction_json(hi)},
+        "limits": [
+            {"shaft": sid, "limit": _fraction_json(limit)} for sid, limit in limit_items
+        ],
+    }
+
+    # ---------- 高斯-若尔当消元（与 /api/solve 同一套 RREF） ----------
+    mat = [row[:] for row in work_rows]
+    pivot_cols = _rref(mat, n)
+
+    if any(all(row[j] == 0 for j in range(n)) and row[n] != 0 for row in mat):
+        # 无解：删除法定位不可再缩减的冲突条件集（在去掉输入轴已知转速后的条件集上）
+        kept = _minimize_conflict(work_rows, n)
+        return {
+            "status": "inconsistent",
+            "shafts": shaft_ids,
+            "message": "去掉可调输入轴的已知转速后，方程组仍出现矛盾方程 0 = 非零常数，"
+                       "该齿轮系无解，谈不上安全调速区间。",
+            "conflict": [
+                {"type": work_tags[j][0], "index": work_tags[j][1]} for j in kept
+            ],
+        }
+
+    pivot_row_of = {c: i for i, c in enumerate(pivot_cols)}
+    free_cols = [j for j in range(n) if j not in pivot_row_of]
+    in_col = index[input_sid]
+
+    def omega_expr(col: int) -> tuple[Fraction, dict[int, Fraction]]:
+        """轴 col 转速关于自由变量的仿射表达式：常数项 + 各自由变量系数。"""
+        if col in pivot_row_of:
+            r = pivot_row_of[col]
+            terms = {c: -mat[r][c] for c in free_cols if mat[r][c] != 0}
+            return mat[r][n], terms
+        return Fraction(0), {col: Fraction(1)}
+
+    consts: list[Fraction] = []
+    coeffs: list[dict[int, Fraction]] = []
+    for j in range(n):
+        c, terms = omega_expr(j)
+        consts.append(c)
+        coeffs.append(terms)
+    in_const, in_terms = consts[in_col], coeffs[in_col]
+
+    def expressions_json(alphas: list[Fraction], betas: list[Fraction]) -> list[dict]:
+        """各轴转速关于输入 x 的一次表达式 ω_j = α_j·x + β_j 的 JSON 表示。"""
+        return [
+            {
+                "shaft": shaft_ids[j],
+                "alpha": _fraction_json(alphas[j]),
+                "beta": _fraction_json(betas[j]),
+            }
+            for j in range(n)
+        ]
+
+    # ---------- 情形一：其余条件已把输入限定为单点（无自由变量） ----------
+    if not free_cols:
+        x0 = in_const
+        expressions = expressions_json([Fraction(0)] * n, consts)
+        if x0 < lo or x0 > hi:
+            return {
+                **base,
+                "status": "none",
+                "single_point": True,
+                "expressions": expressions,
+                "message": f"其余条件已把输入轴 {input_sid} 的转速限定为单点 {x0} rpm，"
+                           f"落在允许区间 [{lo}, {hi}] 之外：没有任何可行输入。",
+            }
+        for sid, limit in limit_items:
+            w = consts[index[sid]]
+            if abs(w) > limit:
+                return {
+                    **base,
+                    "status": "none",
+                    "single_point": True,
+                    "expressions": expressions,
+                    "message": f"其余条件已把输入轴 {input_sid} 的转速限定为单点 {x0} rpm，"
+                               f"但轴 {sid} 的转速恒为 {w} rpm，|ω| 超过其上限 {limit} rpm："
+                               "没有任何可行输入。",
+                }
+        return {
+            **base,
+            "status": "ok",
+            "single_point": True,
+            "expressions": expressions,
+            "interval": {"min": _fraction_json(x0), "max": _fraction_json(x0)},
+            "lower_sources": [{"type": "fixed"}],
+            "upper_sources": [{"type": "fixed"}],
+            "message": f"其余条件已把输入轴 {input_sid} 的转速限定为单点 {x0} rpm，"
+                       "且全部限速均满足：安全区间即该单点。",
+        }
+
+    # ---------- 情形二：输入被限定为单点，但仍有自由变量（欠定） ----------
+    def constant_limit_violation() -> tuple[int, Fraction, Fraction] | None:
+        """限速轴中转速已被其余条件唯一确定（不含自由变量）且恒定越限的第一根轴。"""
+        for sid, limit in limit_items:
+            j = index[sid]
+            if not coeffs[j] and abs(consts[j]) > limit:
+                return sid, consts[j], limit
+        return None
+
+    if not in_terms:
+        x0 = in_const
+        if x0 < lo or x0 > hi:
+            return {
+                **base,
+                "status": "none",
+                "single_point": True,
+                "message": f"其余条件已把输入轴 {input_sid} 的转速限定为单点 {x0} rpm，"
+                           f"落在允许区间 [{lo}, {hi}] 之外：没有任何可行输入。",
+            }
+        violation = constant_limit_violation()
+        if violation is not None:
+            sid, w, limit = violation
+            return {
+                **base,
+                "status": "none",
+                "message": f"其余条件已把输入轴 {input_sid} 的转速限定为单点 {x0} rpm，"
+                           f"但轴 {sid} 的转速恒为 {w} rpm，|ω| 超过其上限 {limit} rpm："
+                           "没有任何可行输入。",
+            }
+        return {
+            **base,
+            "status": "underdetermined",
+            "free_count": len(free_cols),
+            "free_shafts": [shaft_ids[c] for c in free_cols],
+            "message": f"其余条件已把输入轴 {input_sid} 的转速限定为单点 {x0} rpm"
+                       f"（在允许区间内），但模型仍有 {len(free_cols)} 根自由轴（"
+                       f"{('、').join(str(shaft_ids[c]) for c in free_cols)}）：该输入下仍有"
+                       "轴速不能唯一确定，返回欠定，不给出安全区间。",
+        }
+
+    # ---------- 情形三：固定输入只能消去一个自由度，仍有其余自由变量（欠定） ----------
+    if len(free_cols) > 1:
+        violation = constant_limit_violation()
+        if violation is not None:
+            sid, w, limit = violation
+            return {
+                **base,
+                "status": "none",
+                "message": f"轴 {sid} 的转速不随输入变化，恒为 {w} rpm，|ω| 超过其上限 "
+                           f"{limit} rpm：没有任何输入转速可行。",
+            }
+        return {
+            **base,
+            "status": "underdetermined",
+            "free_count": len(free_cols),
+            "free_shafts": [shaft_ids[c] for c in free_cols],
+            "message": f"模型共有 {len(free_cols)} 根自由轴（"
+                       f"{('、').join(str(shaft_ids[c]) for c in free_cols)}），固定输入轴 "
+                       f"{input_sid} 的转速只能消去 1 个自由度：可行输入存在，但该输入下仍有"
+                       "轴速不能唯一确定，返回欠定，不给出安全区间。",
+        }
+
+    # ---------- 情形四：x 唯一确定全部轴速，ω_j = α_j·x + β_j ----------
+    f = free_cols[0]
+    a_in = in_terms[f]  # 输入表达式必含该自由变量（否则已归入情形二）
+    alphas = [coeffs[j].get(f, Fraction(0)) / a_in for j in range(n)]
+    betas = [consts[j] - alphas[j] * in_const for j in range(n)]
+    expressions = expressions_json(alphas, betas)
+
+    # 输入允许区间与每条 |α_j·x + β_j| ≤ L_j 求交（全程有理数）
+    lo_star, hi_star = lo, hi
+    lower_sources: list[dict] = [{"type": "input"}]
+    upper_sources: list[dict] = [{"type": "input"}]
+    for sid, limit in limit_items:
+        j = index[sid]
+        a, b = alphas[j], betas[j]
+        if a == 0:
+            if abs(b) > limit:
+                return {
+                    **base,
+                    "status": "none",
+                    "expressions": expressions,
+                    "message": f"轴 {sid} 的转速不随输入变化，恒为 {b} rpm，|ω| 超过其上限 "
+                               f"{limit} rpm：没有任何输入转速可行。",
+                }
+            continue
+        u1 = (-limit - b) / a
+        u2 = (limit - b) / a
+        lj, hj = (u1, u2) if u1 <= u2 else (u2, u1)
+        if lj > lo_star:
+            lo_star = lj
+            lower_sources = [{"type": "limit", "shaft": sid}]
+        elif lj == lo_star:
+            lower_sources.append({"type": "limit", "shaft": sid})
+        if hj < hi_star:
+            hi_star = hj
+            upper_sources = [{"type": "limit", "shaft": sid}]
+        elif hj == hi_star:
+            upper_sources.append({"type": "limit", "shaft": sid})
+
+    if lo_star > hi_star:
+        return {
+            **base,
+            "status": "none",
+            "expressions": expressions,
+            "lower": {"value": _fraction_json(lo_star), "sources": lower_sources},
+            "upper": {"value": _fraction_json(hi_star), "sources": upper_sources},
+            "message": f"输入允许区间与各轴限速约束求交后为空：可行下限 {lo_star} 高于"
+                       f"可行上限 {hi_star}，没有任何输入转速能同时满足全部限速。",
+        }
+
+    return {
+        **base,
+        "status": "ok",
+        "single_point": lo_star == hi_star,
+        "expressions": expressions,
+        "interval": {"min": _fraction_json(lo_star), "max": _fraction_json(hi_star)},
+        "lower_sources": lower_sources,
+        "upper_sources": upper_sources,
+        "message": f"输入允许区间 [{lo}, {hi}] 与 {len(limit_items)} 条限速约束求交，"
+                   f"最大安全闭区间为 [{lo_star}, {hi_star}] rpm。",
     }

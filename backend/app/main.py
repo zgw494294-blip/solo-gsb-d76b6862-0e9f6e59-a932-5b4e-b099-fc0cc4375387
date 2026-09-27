@@ -8,6 +8,7 @@ API 路由优先于静态文件挂载：
   POST /api/mesh-harmonics      啮合谐波重合诊断：各关系基频 1~12 次谐波的跨关系重合
   POST /api/brake-plans         最少制动轴方案：枚举可制动轴子集，求制动轴数最少的有效方案
   POST /api/sensor-plans        测速点布设：枚举可增设测速点的轴的子集，求测点数最少的有效方案
+  POST /api/safe-speed-range    输入轴安全调速区间：已知转速改可调输入，求满足各轴限速的最大安全闭区间
   其余路径                      提供前端静态页面
 """
 
@@ -20,6 +21,7 @@ from fastapi.staticfiles import StaticFiles
 from .solver import (
     BrakePlansRequest,
     GearOptionsRequest,
+    SafeSpeedRangeRequest,
     SensorPlansRequest,
     SolveRequest,
     TorqueBalanceRequest,
@@ -27,13 +29,14 @@ from .solver import (
     brake_plans,
     gear_options,
     mesh_harmonics,
+    safe_speed_range,
     sensor_plans,
     solve,
     torque_balance,
     transmission_paths,
 )
 
-app = FastAPI(title="齿轮系转速求解台", version="1.6.0")
+app = FastAPI(title="齿轮系转速求解台", version="1.7.0")
 
 FRONTEND_DIR = Path(__file__).resolve().parents[2] / "frontend"
 
@@ -71,6 +74,11 @@ def api_brake_plans(req: BrakePlansRequest) -> dict:
 @app.post("/api/sensor-plans")
 def api_sensor_plans(req: SensorPlansRequest) -> dict:
     return sensor_plans(req)
+
+
+@app.post("/api/safe-speed-range")
+def api_safe_speed_range(req: SafeSpeedRangeRequest) -> dict:
+    return safe_speed_range(req)
 
 
 @app.get("/healthz")
